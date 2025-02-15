@@ -1,0 +1,219 @@
+---
+title: "Organoid CAF Co-Culture Analysis"
+author: "Abby Coleman"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+      toc: TRUE
+      toc_float: TRUE
+      toc_depth: 2
+      keep_md: yes
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(renv)
+library(knitr)
+library(tidyverse)
+library(rmarkdown)
+library(emdbook)
+library(viridis)
+library(gt)
+library(kableExtra)
+library(patchwork)
+library(webshot2)
+library(png)
+library(plater)
+library(ggbeeswarm)
+library(janitor)
+library(drc)
+
+source(here('scripts', 'functions.R'))
+
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+```
+
+# Purpose {.tabset}
+
+The purpose of this analysis is to determine whether there is a difference in patient-derived organoids with and without CAF co-culture.
+
+```{r boxplot_all_experiments_all_compounds, read_in_data, echo = FALSE, warning = FALSE, message = FALSE}
+drms <- readRDS(file = here("data_output", "organoids_all_drms.rds"))
+all_data <- readRDS(file = here("data_output", "organoids_all_raw_data.rds"))
+compounds <- unique(drms$compound_name)
+
+relevant <- c("5-FU", "SN38", "3-BP", "3-BP CAF-CM", "5-FU CAF-CM", "SN38 CAF-CM")
+  
+these_drms <- drms %>% 
+  filter(compound_name %in% relevant)
+
+ic50s_bp <- ggplot(data = these_drms, aes(x = compound_name, y = absolute_ec50)) +
+  geom_boxplot() + 
+  theme_bw(base_size = 16) +
+  geom_quasirandom(aes(color = compound_name), size = 2, alpha = .6) +
+  scale_color_viridis_d(end = .9) +
+  ggtitle("PDTO Absolute IC50s by Compound") +
+  labs(subtitle = "All Experiments") +
+  guides(color = "none") +
+  xlab("Condition") +
+  ylab("Absolute IC50 (uM)")
+  # theme(axis.text=element_text(size=12),
+  #       axis.title=element_text(size=14,face="bold"))
+ic50s_bp
+
+```
+
+```{r boxplot_qc_experiments_only_all_compounds, echo = FALSE, warning = FALSE}
+these_drms_qc <- these_drms %>%
+  filter(flag == "passed QC")
+
+ic50s_bp <- ggplot(data = these_drms_qc, aes(x = compound_name, y = absolute_ec50)) +
+  geom_boxplot() + 
+  theme_bw(base_size = 16) +
+  geom_quasirandom(aes(color = compound_name), size = 2, alpha = .6) +
+  scale_color_viridis_d(end = .9) +
+  ggtitle("PDTO Absolute IC50s by Compound") +
+  labs(subtitle = "Passed QC Only") +
+  guides(color = "none") +
+  xlab("Condition") +
+  ylab("Absolute IC50 (uM)")
+ic50s_bp
+
+
+```
+
+## 3-BP
+
+### Passed QC
+
+
+```{r boxplot_3bp_qc_only, echo = FALSE, warning = FALSE}
+results_3bp <- caf_comp("3-BP")
+
+results_3bp$bp_qc
+```
+
+```{r t_test_3bp_qc_only, echo = FALSE, warning = FALSE}
+results_3bp$test_qc
+```
+
+```{r overlay_plot_3bp_qc_onlyecho = FALSE, warning = FALSE}
+results_3bp$overlay_qc
+```
+
+```{r tables_3bp_qc_only, echo = FALSE, warning = FALSE}
+results_3bp$supp_tables
+```
+
+### All Experiments
+
+```{r boxplot_3bp_all, echo = FALSE, warning = FALSE}
+results_3bp$bp_all
+
+```
+
+```{r t_test_3bp_all, echo = FALSE, warning = FALSE}
+results_3bp$test_all
+
+```
+
+```{r oberlay_plot_3bp_all, echo = FALSE, warning = FALSE}
+results_3bp$overlay_all
+```
+
+## SN38
+
+### Passed QC
+
+
+```{r boxplot_sn38_qc_only, echo = FALSE, warning = FALSE}
+results_sn38 <- caf_comp("SN38")
+
+results_sn38$bp_qc
+```
+
+```{r t_test_sn38_qc_only, echo = FALSE, warning = FALSE}
+results_sn38$test_qc
+```
+
+```{r overlay_plot_sn38_qc_only, echo = FALSE, warning = FALSE}
+results_sn38$overlay_qc
+```
+
+```{r tables_sn38_all, echo = FALSE, warning = FALSE}
+results_sn38$supp_tables
+```
+
+### All Experiments
+
+
+```{r boxplot_sn38_all, echo = FALSE, warning = FALSE}
+results_sn38$bp_all
+```
+
+```{r t_test_sn38_all, echo = FALSE, warning = FALSE}
+results_sn38$test_all
+```
+
+```{r overlay_plot_sn38_all, echo = FALSE, warning = FALSE}
+results_sn38$overlay_all
+```
+
+## 5-FU
+
+### Passed QC
+
+
+```{r boxplot_5fu_qc_only, echo = FALSE, warning = FALSE}
+results_5fu <- caf_comp("5-FU")
+
+results_5fu$bp_qc
+```
+
+```{r t_test_5fu_qc_only, echo = FALSE, warning = FALSE}
+results_5fu$test_qc
+```
+
+```{r overlay_plot_5fu_qc_only, echo = FALSE, warning = FALSE}
+results_5fu$overlay_qc
+```
+
+```{r tables_5fu_all, echo = FALSE, warning = FALSE}
+results_5fu$supp_tables
+```
+
+### All Experiments
+
+
+```{r boxplot_5fu_all, echo = FALSE, warning = FALSE}
+results_5fu$bp_all
+```
+
+```{r t_test_5fu_all, echo = FALSE, warning = FALSE}
+results_5fu$test_all
+```
+
+```{r overlay_plot_5fu_all, echo = FALSE, warning = FALSE}
+results_5fu$overlay_all
+```
+
+```{r output_csv, echo = FALSE, warning = FALSE}
+#output qc metrics table
+output <- these_drms %>%
+  arrange(compound_name, exp_date) %>% 
+  mutate(exp_date = as.character(exp_date)) %>%
+  mutate_if(is.numeric, round, 4) %>%
+  mutate(absolute_ec50_ci = paste("(", abs_lower_ci, ", ", abs_upper_ci, ")", sep = "")) %>%
+  dplyr::select(compound_name, cell_line, file_name, plate_id, exp_date, plate_cv, 
+                z_prime_factor, plate_cv, rse, absolute_ec50, absolute_ec50_ci, flag)
+
+meanrow <- as.data.frame(lapply(output, get_mean_if_numeric))
+meanrow$compound_name <- "Mean:"
+semrow <- as.data.frame(lapply(output, get_sem_if_numeric))
+semrow$compound_name <- "SEM:"
+output <- rbind(output, meanrow, semrow)
+    
+write.csv(output, paste(here("data_output"), "/CAFnoCAFanalysis_", Sys.Date(), ".csv", sep = ""), row.names = FALSE)
+#make mean and sem rows
+```

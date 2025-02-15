@@ -1,0 +1,695 @@
+---
+title: "FLIM Data  Analysis"
+author: "Abby Coleman"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+      toc: true
+      toc_float: true
+      toc_depth: 1
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(renv)
+library(knitr)
+library(ggpubr)
+library(xlsx)
+library(car)
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+library(rmarkdown)
+library(emdbook)
+library(viridis)
+library(broom)
+library(gt)
+library(kableExtra)
+library(patchwork)
+library(batchtma)
+library(webshot2)
+library(png)
+library(plater)
+library(ggbeeswarm)
+library(sjtable2df)
+library(janitor)
+library(drc)
+library(lme4)
+
+source(here('scripts', 'functions.R'))
+
+knitr::opts_chunk$set(echo = FALSE)
+options(scipen=999)
+```
+
+# Purpose 
+
+FLIM collects photon excitation information from cell images. This information is Fourier transformed to collect two parameters—S-coordinate and G-coordinate. These parameters are used to calculate fraction bound (fB), which is the fraction of bound to unbound NADH within the cells we’re looking at. Fraction bound can tell you if the cells are using more glycolysis (more free NADH) or oxidative phosphorylation (more NADH is bound to an enzyme).
+
+The purpose of this analysis is to compare the differences in fraction bound (fB) between conditions between:
+
+* CRC vs CAF-CM
+
+and 
+
+* US vs UA organoids
+* treatment vs no treatment
+
+
+# Replicate Explanation
+
+S-coordinate, G-coordinate, and fraction bound (fB) are collected for three Z-slices of each organoid. These parameters are averaged to estimate their values for the entire organoid. The average of these parameters are averaged again over each well condition. N refers to the number of experimental replicates.
+
+# Mixed Effects Models (Fraction Bound)
+
+```{r data_read_crc_caf}
+crc_caf_df <- readRDS(file = here("data_output", "ua-us_flim_crc-caf.rds")) %>%
+  # mutate(media_type = case_when(media_type == "CRC media" ~ "CRC",
+  #                               media_type == "CAF-CM" ~ "CAF")) %>%
+  group_by(experiment_date, media_type) %>%
+  mutate(g_0um = median(g_coordinate[concentration_u_m == 0], na.rm = TRUE),
+         s_0um = median(s_coordinate[concentration_u_m == 0], na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(experiment_date, media_type, compound) %>%
+  mutate(n_dose = n_distinct(concentration_u_m)) %>% 
+  ungroup() %>%
+  mutate(dist = sqrt((g_coordinate - g_0um)^2 + (s_coordinate - s_0um)^2),
+         cond = paste(media_type, "\n", compound, concentration_u_m, "uM"), 
+         cond_compound_only = paste(compound, "\n", concentration_u_m, "uM"),
+         media_type = relevel(factor(media_type, ordered = FALSE), ref = "CRC media"))
+         # media_type = factor(media_type, ordered = FALSE))
+
+#make an excel sheet for the output
+#have to make this first sheet first so u can append everything else in
+first_sheet <- as.data.frame(paste(Sys.Date(), "FLIM analysis"))
+write.xlsx(first_sheet, here("data_output", "flim_analysis_output.xlsx"), 
+                          sheet = "Main", row.names = FALSE, col.names = FALSE,
+           append = FALSE)
+    
+
+```
+
+```{r superplots, warning = FALSE, message = FALSE, results = "asis", fig.align = "center", fig.height = 4, fig.width = 8}
+for (i in unique(crc_caf_df$compound)) {
+
+  cat("\n")
+  cat(paste("##", i))
+  cat("\n")
+  cat("\n")
+
+  
+  all_orgs_for_plot <- crc_caf_df %>%
+    filter(compound == i) %>%
+    group_by(experiment_date, media_type) %>%
+    mutate(date_doses = n_distinct(concentration_u_m),
+           only_dose = list(unique(concentration_u_m))) %>%
+    ungroup() %>%
+    filter(length(only_dose) > 1 & date_doses > 1) %>%
+    mutate(log_dose = case_when(concentration_u_m == 0 ~ log(min(concentration_u_m[concentration_u_m != 0])/10),
+                                TRUE ~ log(concentration_u_m))) %>%
+    arrange(experiment_date)
+ 
+    
+  crc_cafs_mean <- all_orgs_for_plot %>%
+    # filter(compound == i) %>%
+    group_by(experiment_date, concentration_u_m, media_type, cond_compound_only, cond) %>%
+    dplyr::summarise(fraction_bound = mean(fraction_bound, na.rm = TRUE),
+                     g_coordinate = mean(g_coordinate, na.rm = TRUE),
+                     s_coordinate = mean(s_coordinate, na.rm = TRUE)) %>%
+    #this next line is needed for when you turn cond_compuond_only column into a factor
+    #so you can order that column by media type, concentration even tho it is a character column
+    arrange(media_type, concentration_u_m) %>%
+    mutate(condition = case_when(concentration_u_m == 0 ~ paste(media_type, " Untreated "),
+                                 TRUE ~ paste(media_type, " \n ", concentration_u_m, "uM", sep = "")),
+           cond_compound_only = factor(cond_compound_only, levels = unique(cond_compound_only))) %>%
+    mutate(condition = factor(condition, levels = unique(condition)),
+           cond = factor(cond, levels = unique(cond))) 
+  
+  comparisons <- combn(unique(all_orgs_for_plot$concentration_u_m), 2)
+  comparisons2 <- list()
+  for (j in 1:ncol(comparisons)) {
+    comparisons2[[j]] <- c(comparisons[1, j], comparisons[2, j])
+  }
+  
+  superplot <- ggplot(all_orgs_for_plot, aes(x = as.factor(concentration_u_m), y = fraction_bound)) +
+    facet_wrap(~media_type) +
+    geom_boxplot(data = crc_cafs_mean, aes(x = as.factor(concentration_u_m), y = fraction_bound)) +
+    geom_quasirandom(alpha = .4, aes(color = as.factor(experiment_date))) +
+    scale_color_viridis_d(name = "", labels = paste("Experiment", seq(1, length(unique(all_orgs_for_plot$experiment_date))))) +
+    geom_quasirandom(data = crc_cafs_mean, size = 3, alpha = .9, aes(color = as.factor(experiment_date))) +
+    theme_bw() +
+    ggtitle(i) + 
+    # scale_color_discrete() +
+    ylab("Fraction Bound") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1)) +
+    stat_compare_means(method = "t.test", comparison = comparisons2)
+  
+  
+  
+  print(superplot)
+  # +
+  
+  cat("\n")
+  cat("\n")
+  
+  
+  mod_all <- lmer(fraction_bound ~ log_dose*media_type + (1 | experiment_date), data = all_orgs_for_plot)
+  
+  # redres_all <- plot_redres(mod_all) + ggtitle("mod_all")
+  
+  # plot_redres(mod_all)
+  cat("\n")
+  cat("\n")   
+  # plot_resqq(mod_all)
+  # cat("\n")
+  # cat("\n")  
+  # cat("obvious departures would indicate an invalid assumption")
+  # cat("\n")
+  # cat("\n")
+  # plot_ranef(mod_all)
+  cat("within ribbon is good!")
+  cat("\n")
+  cat("\n")
+  
+  mod_no_media_type <- lmer(fraction_bound ~ log_dose + (1 | experiment_date), data = all_orgs_for_plot)
+  
+  # redres_no_med <- plot_redres(mod_no_media_type) + ggtitle("no_media_type")
+    
+  #add plot to visualize mixed effects model
+  # preds <- data.frame(predict(mod_no_media_type)) %>%
+  #   distinct()
+  # preds_df <- cbind(rownames(preds), preds)
+  # names(preds_df) <- c("concentration_u_m", "fraction_bound")
+  # preds_df <- preds_df %>%
+  #   mutate(concentration_u_m = as.numeric(concentration_u_m),
+  #          fraction_bound = as.numeric(fraction_bound)) %>%
+  #   filter(concentration_u_m <= max(all_orgs_for_plot$concentration_u_m))
+  
+  me_plot <- ggplot(data = all_orgs_for_plot, aes(x = concentration_u_m, y = fraction_bound)) +
+    geom_point(color = "gray") +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    theme_bw() +
+    facet_wrap(~ media_type) +
+    ggtitle(paste(i, "Fraction Bound")) + 
+    labs(subtitle = "Fixed Effects Visualizer") +
+    ylab("Fraction Bound") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1))
+  
+  me_plot_w_date <- ggplot(data = all_orgs_for_plot, aes(x = concentration_u_m, y = fraction_bound, color = as.factor(experiment_date))) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme_bw() +
+    facet_wrap(~ media_type) +
+    scale_color_viridis_d() +
+    ggtitle(paste(i, "Fraction Bound")) + 
+    labs(subtitle = "Mixed Effects Visualizer") +
+    labs(color = "Exp Date") +
+    ylab("Fraction Bound") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1))
+  
+  print(me_plot)
+  
+  cat("\n")
+  cat("\n")
+  
+  print(me_plot_w_date)
+  
+  cat("\n")
+  cat("\n")
+  
+  
+  mod_tab <- sjPlot::tab_model(mod_all)
+  mod_tab_df <- sjtable2df::mtab2df(mtab = mod_tab, n_models = 1, output = "data.frame")
+  #write to excel output
+  write.xlsx(mod_tab_df, here("data_output", "flim_analysis_output.xlsx"), 
+                   sheet = paste(i, "MEM"), row.names = FALSE,
+                   append = TRUE)
+  cat("\n")
+  cat("\n") 
+  
+  cat("This mixed effect model examines the effects of log(drug concentration) and media type on fraction bound, accounting for inter-experiment differences by using experiment_date as a random variable. The estimate column contains the average difference in fraction bound from the intercept produced by either each unit of concentration or by including CAFs.")
+ 
+  cat("\n")
+  cat("\n") 
+  
+  cat("In cases where concentration was equal to 0, log(concentration) was set to log(min(concentration[concentration != 0])).")
+  
+  cat("\n")
+  cat("\n")   
+  
+  print(kable(mod_tab_df) %>%
+          kable_styling(full_width = FALSE))
+
+  cat("\n")
+  cat("\n")  
+  
+  cat("Marginal R2: the proportion of variance explained by the fixed effects relative to the overall variance.")
+  
+  cat("\n")
+  cat("\n")  
+  
+  cat("Conditional R2: the proportion of variance explained by both fixed and random effects relative to the overall variance.")
+
+  cat("\n")
+  cat("\n")
+  
+  seeanova <- anova(mod_all, mod_no_media_type)
+  
+  mod_all_summ <- summary(mod_all)
+  mod_no_media_type_summ <- summary(mod_no_media_type)
+  
+  seeanova <- as.data.frame(seeanova)
+  #kable has a problem with |
+  row.names(seeanova) <- list(deparse(mod_all_summ$call$formula[[3]]), deparse(mod_no_media_type_summ$call$formula[[3]]))
+  
+  print(kable(seeanova,
+              caption = "ANOVA Results") %>%
+          kable_styling(full_width = FALSE))
+  
+  cat("I used an ANOVA test to compare a model with concentration and media_type as predictors and experiment_date as a random effect to a model without the media_type predictor.")
+    
+  effect_size_plot <- sjPlot::plot_model(mod_all, show.values = TRUE, show.p = TRUE) +
+    theme_bw() +
+    ggtitle("Condition Effect on Fraction Bound")
+  
+  cat("\n")
+  cat("\n")
+  
+  print(effect_size_plot)
+  
+  cat("\n")
+  cat("\n")
+}
+```
+
+# Mixed Effects Models (G-Coordinates)
+
+```{r superplots_g, warning = FALSE, message = FALSE, results = "asis", fig.align = "center", fig.height = 4, fig.width = 8}
+for (i in unique(crc_caf_df$compound)) {
+
+  
+  cat("\n")
+  cat(paste("##", i))
+  cat("\n")
+  cat("\n")
+
+  
+  all_orgs_for_plot <- crc_caf_df %>%
+    filter(compound == i) %>%
+    group_by(experiment_date, media_type) %>%
+    mutate(date_doses = n_distinct(concentration_u_m),
+           only_dose = list(unique(concentration_u_m))) %>%
+    ungroup() %>%
+    filter(length(only_dose) > 1 & date_doses > 1) %>%
+    mutate(log_dose = case_when(concentration_u_m == 0 ~ log(min(concentration_u_m[concentration_u_m != 0])/10),
+                                TRUE ~ log(concentration_u_m))) %>%
+    arrange(experiment_date)
+ 
+    
+  crc_cafs_mean <- all_orgs_for_plot %>%
+    # filter(compound == i) %>%
+    group_by(experiment_date, concentration_u_m, media_type, cond_compound_only, cond) %>%
+    dplyr::summarise(fraction_bound = mean(fraction_bound, na.rm = TRUE),
+                     g_coordinate = mean(g_coordinate, na.rm = TRUE),
+                     s_coordinate = mean(s_coordinate, na.rm = TRUE)) %>%
+    #this next line is needed for when you turn cond_compuond_only column into a factor
+    #so you can order that column by media type, concentration even tho it is a character column
+    arrange(media_type, concentration_u_m) %>%
+    mutate(condition = case_when(concentration_u_m == 0 ~ paste(media_type, " Untreated "),
+                                 TRUE ~ paste(media_type, " \n ", concentration_u_m, "uM", sep = "")),
+           cond_compound_only = factor(cond_compound_only, levels = unique(cond_compound_only))) %>%
+    mutate(condition = factor(condition, levels = unique(condition)),
+           cond = factor(cond, levels = unique(cond))) 
+  
+  superplot <- ggplot(all_orgs_for_plot, aes(x = as.factor(concentration_u_m), y = g_coordinate)) +
+    facet_wrap(~media_type) +
+    geom_boxplot(data = crc_cafs_mean, aes(x = as.factor(concentration_u_m), y = g_coordinate)) +
+    geom_quasirandom(alpha = .4, aes(color = as.factor(experiment_date))) +
+    scale_color_viridis_d() + 
+    geom_quasirandom(data = crc_cafs_mean, size = 3, alpha = .9, aes(color = as.factor(experiment_date))) +
+    theme_bw() +
+    ggtitle(i) + 
+    labs(color = "") +
+    ylab("G Coordinate") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1))  +
+    stat_compare_means(data = all_orgs_for_plot, method = "anova")
+
+  print(superplot)
+  # +
+  
+  cat("\n")
+  cat("\n")
+  
+  
+  mod_all <- lmer(g_coordinate ~ log_dose*media_type + (1 | experiment_date), data = all_orgs_for_plot)
+  
+
+  cat("\n")
+  cat("\n")   
+
+  mod_no_media_type <- lmer(g_coordinate ~ log_dose + (1 | experiment_date), data = all_orgs_for_plot)
+  
+  me_plot <- ggplot(data = all_orgs_for_plot, aes(x = concentration_u_m, y = g_coordinate)) +
+    geom_point(color = "gray") +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    theme_bw() +
+    facet_wrap(~ media_type) +
+    ggtitle(paste(i, "G-Coordinate")) + 
+    labs(subtitle = "Fixed Effects Visualizer") +
+    ylab("G-Coordinate") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1))
+  
+  me_plot_w_date <- ggplot(data = all_orgs_for_plot, aes(x = concentration_u_m, y = g_coordinate, color = as.factor(experiment_date))) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme_bw() +
+    facet_wrap(~ media_type) +
+    scale_color_viridis_d() +
+    ggtitle(paste(i, "G-Coordinate")) + 
+    labs(subtitle = "Mixed Effects Visualizer") +
+    labs(color = "Exp Date") +
+    ylab("G-Coordinate") +
+    xlab(paste(i, "uM")) + 
+    ylim(c(0, 1))
+  
+  print(me_plot)
+  
+  cat("\n")
+  cat("\n")
+  
+  print(me_plot_w_date)
+  
+  cat("\n")
+  cat("\n")
+  
+  
+  mod_tab <- sjPlot::tab_model(mod_all)
+  mod_tab_df <- sjtable2df::mtab2df(mtab = mod_tab, n_models = 1, output = "data.frame")
+
+  cat("\n")
+  cat("\n") 
+  
+  cat("This mixed effect model examines the effects of log(drug concentration) and media type on G-coordinate, accounting for inter-experiment differences by using experiment_date as a random variable. The estimate column contains the average difference in G-coordinate from the intercept produced by either each unit of concentration or by including CAFs.")
+ 
+  cat("\n")
+  cat("\n") 
+  
+  cat("In cases where concentration was equal to 0, log(concentration) was set to log(min(concentration[concentration != 0])).")
+  
+  cat("\n")
+  cat("\n")   
+  
+  print(kable(mod_tab_df) %>%
+          kable_styling(full_width = FALSE))
+
+  cat("\n")
+  cat("\n")  
+  
+  cat("Marginal R2: the proportion of variance explained by the fixed effects relative to the overall variance.")
+  
+  cat("\n")
+  cat("\n")  
+  
+  cat("Conditional R2: the proportion of variance explained by both fixed and random effects relative to the overall variance.")
+
+  cat("\n")
+  cat("\n")
+  
+  seeanova <- anova(mod_all, mod_no_media_type)
+  
+  mod_all_summ <- summary(mod_all)
+  mod_no_media_type_summ <- summary(mod_no_media_type)
+  
+  seeanova <- as.data.frame(seeanova)
+  #kable has a problem with |
+  row.names(seeanova) <- list(deparse(mod_all_summ$call$formula[[3]]), deparse(mod_no_media_type_summ$call$formula[[3]]))
+  
+  print(kable(seeanova,
+              caption = "ANOVA Results") %>%
+          kable_styling(full_width = FALSE))
+  
+  cat("I used an ANOVA test to compare a model with concentration and media_type as predictors and experiment_date as a random effect to a model without the media_type predictor.")
+    
+  effect_size_plot <- sjPlot::plot_model(mod_all, show.values = TRUE, show.p = TRUE) +
+    theme_bw() +
+    ggtitle("Condition Effect on G-Coordinate")
+  
+  cat("\n")
+  cat("\n")
+  
+  print(effect_size_plot)
+  
+  cat("\n")
+  cat("\n")
+}
+```
+
+# Batch Correction
+
+
+mixed effects model correction were done as described [here](https://jdblischak.github.io/singleCellSeq/analysis/batch-limma.html)
+using the mod_all model that includes concentration_u_m and media_type as fixed effects and experiment_date as a random effect
+
+this didn't do very much
+
+so a linear fixed effects model correction was done with [batchtma](https://cran.r-project.org/web/packages/batchtma/vignettes/batchtma.html)
+
+![I used the standard method to adjust for batch with a linear model. I used concentration_u_m and media_type as confounders.](/Users/acoleman/Documents/GitHub/metabolic-crosstalk/images/batchtma_standard_method_explainer.png)
+
+
+
+
+
+```{r batch, warning = FALSE, message = FALSE, results = "asis", fig.align = "center", fig.height = 4, fig.width = 8}
+for (i in unique(crc_caf_df$compound)) {
+  
+  cat("\n")  
+  cat("\n")
+  cat("\n")
+  cat(paste("##", i))
+  cat("\n")
+  cat("\n")
+
+  
+  all_orgs_for_plot <- crc_caf_df %>%
+    filter(compound == i) %>%
+    group_by(experiment_date, media_type) %>%
+    mutate(date_doses = n_distinct(concentration_u_m),
+           only_dose = list(unique(concentration_u_m))) %>%
+    ungroup() %>%
+    filter(length(only_dose) > 1 & date_doses > 1) %>%
+    arrange(experiment_date)
+  
+    mod_all <- lmer(fraction_bound ~ concentration_u_m*media_type + (1 | experiment_date), data = all_orgs_for_plot)
+    mod_nod8 <- lm(fraction_bound ~ concentration_u_m*media_type, data = all_orgs_for_plot)
+    
+    batch_corr_aov <- anova(mod_all, mod_nod8)
+    
+    print(kable(batch_corr_aov,
+              caption = "ChiSq Goodness-of-Fit Results") %>%
+          kable_styling(full_width = FALSE))
+      
+    mod_matrix <- model.matrix(mod_all)
+    mem_summary <- summary(mod_all)
+    batch_corrected <- t( mod_matrix %*% as.matrix(mem_summary$coefficients[,1]) ) + mem_summary$residuals
+    all_orgs_for_plot[["mem_fraction_bound"]] <- c(batch_corrected)
+    
+    #doesn't make sense to batch correct for mixed effect with the batch as a random effect
+    #cuz then it just corrects for each linear model
+   
+    mod_matrix <- model.matrix(mod_nod8)
+    mem_summary <- summary(mod_nod8)
+    batch_corrected <- t( mod_matrix %*% as.matrix(mem_summary$coefficients[,1]) ) + mem_summary$residuals
+    all_orgs_for_plot[["mem_fraction_bound"]] <- c(batch_corrected)
+    all_orgs_for_plot <- all_orgs_for_plot %>%
+      mutate(confounder = paste(media_type, concentration_u_m),
+             see = mem_fraction_bound - fraction_bound)
+
+    all_orgs_for_plot_2 <- adjust_batch(data = all_orgs_for_plot, markers = fraction_bound, batch = experiment_date, method = standardize, confounders = confounder)
+    
+    batch_corr_means <- all_orgs_for_plot %>%
+      # filter(compound == i) %>%
+      group_by(experiment_date, concentration_u_m, media_type, cond_compound_only, cond) %>%
+      dplyr::summarise(fraction_bound = mean(fraction_bound, na.rm = TRUE),
+                       mem_fraction_bound = mean(mem_fraction_bound, na.rm = TRUE)) %>%
+      #this next line is needed for when you turn cond_compuond_only column into a factor
+      #so you can order that column by media type, concentration even tho it is a character column
+      arrange(media_type, concentration_u_m) %>%
+      mutate(cond_compound_only = factor(cond_compound_only, levels = unique(cond_compound_only)))
+
+    lm_batch_corr_means <- all_orgs_for_plot_2 %>%
+      # filter(compound == i) %>%
+      group_by(experiment_date, concentration_u_m, media_type, cond_compound_only, cond) %>%
+      dplyr::summarise(fraction_bound_adj3 = mean(fraction_bound_adj3, na.rm = TRUE),
+                     mem_fraction_bound = mean(mem_fraction_bound, na.rm = TRUE)) %>%
+      #this next line is needed for when you turn cond_compuond_only column into a factor
+      #so you can order that column by media type, concentration even tho it is a character column
+      arrange(media_type, concentration_u_m) %>%
+      mutate(cond_compound_only = factor(cond_compound_only, levels = unique(cond_compound_only)))
+    
+    lm_batch_corr_plot <- ggplot() +
+      facet_wrap(~media_type) +
+      geom_boxplot(data = lm_batch_corr_means, aes(x = as.factor(concentration_u_m), y = fraction_bound_adj3)) +
+      geom_quasirandom(data = all_orgs_for_plot_2, aes(x = as.factor(concentration_u_m), y = fraction_bound_adj3, color = as.factor(experiment_date)), alpha = .4) +
+      scale_color_viridis_d(name = "", labels = paste("Experiment", seq(1, length(unique(all_orgs_for_plot$experiment_date))))) +      
+      geom_quasirandom(data = lm_batch_corr_means, size = 3, alpha = .9, aes(color = as.factor(experiment_date), x = as.factor(concentration_u_m), y = fraction_bound_adj3)) +
+      theme_bw() +
+      ggtitle(paste(i, "Batch Corrected")) + 
+      labs(color = "") +
+      ylab("Fraction Bound") +
+      xlab(paste(i, "uM")) +
+      stat_compare_means(comparison = comparisons2, label = "p.signif", size = 2, vjust = .2, method = "wilcox.test") +
+      ylim(c(0, 1))
+    
+    fitted <- diagnose_models(all_orgs_for_plot_2)
+    fit <- fitted$model_fits[[1]][[1]]
+    
+    batch_adjuster_lm_resid_plot <- tibble(fitted = fitted.values(fit),
+       residuals = residuals(fit)) %>%
+      ggplot(mapping = aes(x = fitted, y = residuals)) +
+      geom_point() +
+      theme_minimal() +
+      ggtitle("Batch Adjuster Linear Model Residual Plot")
+ 
+    cat("\n")
+    cat("\n")   
+    print(batch_adjuster_lm_resid_plot)
+    cat("\n")
+    cat("\n")
+    
+    cat("are there any other model diagnostics i should run here? plot residuals to check for normality (linear reg models assume normality of residuals)?")
+
+    cat("\n")
+    cat("\n")   
+    print( hist(fitted.values(fit)))
+    
+    cat("/n")
+    cat("/n")    
+    
+    un_batch_corr_plot <- ggplot() +
+      facet_wrap(~media_type) +
+      geom_boxplot(data = batch_corr_means, aes(x = as.factor(concentration_u_m), y = fraction_bound)) +
+      geom_quasirandom(data = all_orgs_for_plot, aes(x = as.factor(concentration_u_m), y = fraction_bound, color = as.factor(experiment_date)), alpha = .4) +
+      scale_color_viridis_d(name = "", labels = paste("Experiment", seq(1, length(unique(all_orgs_for_plot$experiment_date))))) +
+      geom_quasirandom(data = batch_corr_means, size = 3, alpha = .9, aes(color = as.factor(experiment_date), x = as.factor(concentration_u_m), y = fraction_bound)) +      theme_bw() +
+      ggtitle(paste(i, "Not Batch Corrected")) + 
+      labs(color = "") +
+      ylab("Fraction Bound") +
+      xlab(paste(i, "uM")) +
+      ylim(c(0, 1))
+    
+    print(lm_batch_corr_plot)
+    cat("I checked, and the values are being changed by the batch correction, just not by very much.")
+    print(un_batch_corr_plot)
+    cat("\n")
+    cat("\n")
+  
+    cat(paste("###", i, "ANOVA Test Results"))
+    cat("\n")
+    cat("\n")
+    
+    #batch corrected = lm_batch_corr_means$fraction_bound_adj3
+    #rename that col so it's the same for both and i can use it in my get_anova_results function
+    lm_batch_corr_means <- lm_batch_corr_means %>%
+      mutate(fraction_bound = fraction_bound_adj3)
+    #unbatch corrected = batch_corr_means$fraction_bound
+      #that's very confusing but i double checked and batch_corr_means$fraction_bound is the column to use for non-batch corrected stuff
+    #use get_anova_results function
+    un_batch_corr_tab <- get_anova_results(batch_corr_means)
+    
+    batch_corr_tab <- get_anova_results(lm_batch_corr_means, batch_corr = TRUE)
+    
+    print(un_batch_corr_tab$check_norm)
+    cat("\n")
+    cat("\n")
+    print(kable(un_batch_corr_tab$test_results_output, digits = 7,
+                caption = "Not Batch Corrected") %>%
+                kable_styling(full_width = F))
+    cat("\n")
+    cat("\n")
+    
+    stat_test_table_sig_aov <- un_batch_corr_tab$test_results_output %>%
+      filter(aov < .05)
+
+    if (nrow(stat_test_table_sig_aov) > 0) {
+      stat_test_table_sig_aov %>%
+        pmap(flim_posthoc, g_h_results = un_batch_corr_tab$g_h_results, tukeys_tables = un_batch_corr_tab$tukeys_tables, batch_corr = FALSE)
+    }
+    cat("\n")
+    cat("\n")      
+      
+    print(batch_corr_tab$check_norm)
+    cat("\n")
+    cat("\n")
+    print(kable(batch_corr_tab$test_results_output, digits = 7,
+                caption = "Fixed Effects Model Batch Corrected") %>%
+                kable_styling(full_width = F))
+    
+    cat("\n")
+    cat("\n")
+    
+    stat_test_table_sig_aov <- batch_corr_tab$test_results_output %>%
+      filter(aov_pval < .05)
+    if (nrow(stat_test_table_sig_aov) > 0) {
+      stat_test_table_sig_aov  %>%
+        pmap(flim_posthoc, g_h_results = batch_corr_tab$g_h_results, tukeys_tables = batch_corr_tab$tukeys_tables, batch_corr = TRUE)
+    }
+    cat("\n")
+    cat("\n")   
+    
+}
+
+```
+
+# UA/US and 2DG/DCA
+
+**Summary: There is not a significant difference in fB between UA/US organoids or the 2DG/DCA treatment conditions.**
+
+A multi-way ANOVA test is used to compare fB between conditions. Bartlett's test was used to test the assumption of equal variance.
+
+Each biological replicate used in these tests is an average of technical replicates. Individual fB scores are averaged over experiment_date, treatment, and organoid type.
+
+
+```{r data_read_ua_us, message = FALSE}
+ua_us_df <- readRDS(file = here("data_output", "ua-us_flim_trt-untrt.rds")) %>%
+  group_by(experiment_date, treatment, organoid_type) %>%
+  dplyr::summarise(fraction_bound = mean(fraction_bound, na.rm = TRUE)) %>%
+  mutate(treatment = case_when(grepl("untreated", treatment, ignore.case = TRUE) ~ tolower(treatment),
+                               TRUE ~ treatment),
+         trtmnt_org = paste(treatment, organoid_type),
+         treatment = as.factor(treatment),
+         organoid_type = as.factor(organoid_type))
+```
+
+```{r analysis_ua_us}
+bp <- ggplot(data = ua_us_df, aes(x = treatment, y = fraction_bound)) +
+  geom_boxplot() + 
+  facet_wrap(~organoid_type) +
+  geom_quasirandom(aes(color = as.factor(experiment_date)), alpha = .7) +
+  theme_bw() +
+  ggtitle("UA vs. US") +
+  xlab("Treatment") +
+  ylab("Fraction Bound") +
+  ylim(c(0, 1)) +
+  scale_color_viridis_d() +
+  labs(color = "Exp Date")
+
+bp
+```
+
+```{r test_assumptions}
+bartlett_res <- bartlett.test(fraction_bound ~ as.factor(trtmnt_org), ua_us_df)
+bartlett_res
+```
+Bartlett's test did not find a significantly unequal variance betwee n treatment and organoid type. A multi-way ANOVA test is appropriate.
+
+```{r tests_ua_us}
+aov_res <- aov(fraction_bound ~ as.factor(treatment) + as.factor(organoid_type), ua_us_df)
+summary(aov_res)
+```
+Neither of the p-values for this multi-way ANOVA test are below .05. There is not a significant difference in fraction bound (fB) between treatment or organoid type.
